@@ -5,8 +5,6 @@ publishes sequenced binary messages; the handler consumes them through a
 lock-free SPSC ring buffer, watches for sequence gaps, and requests
 retransmission instead of silently losing data.
 
-Built over 5 days, Oct 17 to 21, 2026.
-
 ## Plan
 
 - Binary message codec for a small ITCH-like message set (add, execute,
@@ -19,7 +17,8 @@ Built over 5 days, Oct 17 to 21, 2026.
 
 ## Status
 
-Just started. Day 1 is the codec and the simulator skeleton.
+Early days: the codec and the simulator come first, then the ring buffer
+and gap recovery.
 
 ## License
 
