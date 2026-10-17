@@ -1,5 +1,10 @@
 //! Binary wire codec for a small ITCH-like message set.
 //!
+//! Ten message types, following the Nasdaq ITCH 5.0 type bytes: system
+//! events, stock directory, add order (with and without MPID attribution),
+//! order executed (with and without an explicit execution price), cancel,
+//! delete, replace, and trade.
+//!
 //! Layout on the wire, everything big-endian:
 //!
 //! ```text
@@ -12,19 +17,36 @@
 use std::fmt;
 
 /// One-byte type tags.
+pub const TAG_SYSTEM_EVENT: u8 = b'S';
+pub const TAG_STOCK_DIRECTORY: u8 = b'R';
 pub const TAG_ADD_ORDER: u8 = b'A';
+pub const TAG_ADD_ORDER_MPID: u8 = b'F';
 pub const TAG_ORDER_EXECUTED: u8 = b'E';
+pub const TAG_ORDER_EXECUTED_PRICE: u8 = b'C';
 pub const TAG_ORDER_CANCEL: u8 = b'X';
 pub const TAG_ORDER_DELETE: u8 = b'D';
 pub const TAG_ORDER_REPLACE: u8 = b'U';
 pub const TAG_TRADE: u8 = b'P';
 
-/// Symbol field is 6 bytes, space-padded.
+/// System event codes, from the ITCH spec.
+pub const EVENT_START_OF_MESSAGES: u8 = b'O';
+pub const EVENT_START_OF_SYSTEM_HOURS: u8 = b'S';
+pub const EVENT_START_OF_MARKET_HOURS: u8 = b'Q';
+pub const EVENT_END_OF_MARKET_HOURS: u8 = b'M';
+pub const EVENT_END_OF_SYSTEM_HOURS: u8 = b'E';
+pub const EVENT_END_OF_MESSAGES: u8 = b'C';
+
+/// Symbol field is 6 bytes, space-padded. MPID attribution is 4 bytes.
 pub const SYMBOL_LEN: usize = 6;
+pub const MPID_LEN: usize = 4;
 
 pub const HEADER_LEN: usize = 1 + 8 + 8;
+pub const SYSTEM_EVENT_LEN: usize = HEADER_LEN + 1;
+pub const STOCK_DIRECTORY_LEN: usize = HEADER_LEN + SYMBOL_LEN;
 pub const ADD_ORDER_LEN: usize = HEADER_LEN + 8 + 1 + 4 + 8 + SYMBOL_LEN;
+pub const ADD_ORDER_MPID_LEN: usize = HEADER_LEN + 8 + 1 + 4 + 8 + MPID_LEN + SYMBOL_LEN;
 pub const ORDER_EXECUTED_LEN: usize = HEADER_LEN + 8 + 4 + 8 + 8;
+pub const ORDER_EXECUTED_PRICE_LEN: usize = HEADER_LEN + 8 + 4 + 8 + 8 + 1;
 pub const ORDER_CANCEL_LEN: usize = HEADER_LEN + 8 + 4;
 pub const ORDER_DELETE_LEN: usize = HEADER_LEN + 8;
 pub const ORDER_REPLACE_LEN: usize = HEADER_LEN + 8 + 8 + 4 + 8;
@@ -62,6 +84,14 @@ pub struct Header {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
+    SystemEvent {
+        header: Header,
+        event_code: u8,
+    },
+    StockDirectory {
+        header: Header,
+        symbol: [u8; SYMBOL_LEN],
+    },
     AddOrder {
         header: Header,
         order_id: u64,
@@ -70,12 +100,29 @@ pub enum Message {
         price: u64,
         symbol: [u8; SYMBOL_LEN],
     },
+    AddOrderMPID {
+        header: Header,
+        order_id: u64,
+        side: Side,
+        qty: u32,
+        price: u64,
+        mpid: [u8; MPID_LEN],
+        symbol: [u8; SYMBOL_LEN],
+    },
     OrderExecuted {
         header: Header,
         order_id: u64,
         qty: u32,
         price: u64,
         match_id: u64,
+    },
+    OrderExecutedWithPrice {
+        header: Header,
+        order_id: u64,
+        qty: u32,
+        price: u64,
+        match_id: u64,
+        printable: bool,
     },
     OrderCancel {
         header: Header,
@@ -168,6 +215,12 @@ fn read_symbol(buf: &[u8], off: usize) -> [u8; SYMBOL_LEN] {
     s
 }
 
+fn read_mpid(buf: &[u8], off: usize) -> [u8; MPID_LEN] {
+    let mut m = [0u8; MPID_LEN];
+    m.copy_from_slice(&buf[off..off + MPID_LEN]);
+    m
+}
+
 /// Pad or truncate a symbol to the 6-byte wire field.
 pub fn symbol_bytes(s: &str) -> [u8; SYMBOL_LEN] {
     let mut out = [b' '; SYMBOL_LEN];
@@ -180,8 +233,12 @@ pub fn symbol_bytes(s: &str) -> [u8; SYMBOL_LEN] {
 impl Message {
     pub fn tag(&self) -> u8 {
         match self {
+            Message::SystemEvent { .. } => TAG_SYSTEM_EVENT,
+            Message::StockDirectory { .. } => TAG_STOCK_DIRECTORY,
             Message::AddOrder { .. } => TAG_ADD_ORDER,
+            Message::AddOrderMPID { .. } => TAG_ADD_ORDER_MPID,
             Message::OrderExecuted { .. } => TAG_ORDER_EXECUTED,
+            Message::OrderExecutedWithPrice { .. } => TAG_ORDER_EXECUTED_PRICE,
             Message::OrderCancel { .. } => TAG_ORDER_CANCEL,
             Message::OrderDelete { .. } => TAG_ORDER_DELETE,
             Message::OrderReplace { .. } => TAG_ORDER_REPLACE,
@@ -191,8 +248,12 @@ impl Message {
 
     pub fn header(&self) -> &Header {
         match self {
+            Message::SystemEvent { header, .. } => header,
+            Message::StockDirectory { header, .. } => header,
             Message::AddOrder { header, .. } => header,
+            Message::AddOrderMPID { header, .. } => header,
             Message::OrderExecuted { header, .. } => header,
+            Message::OrderExecutedWithPrice { header, .. } => header,
             Message::OrderCancel { header, .. } => header,
             Message::OrderDelete { header, .. } => header,
             Message::OrderReplace { header, .. } => header,
@@ -202,8 +263,12 @@ impl Message {
 
     pub fn encoded_len(&self) -> usize {
         match self {
+            Message::SystemEvent { .. } => SYSTEM_EVENT_LEN,
+            Message::StockDirectory { .. } => STOCK_DIRECTORY_LEN,
             Message::AddOrder { .. } => ADD_ORDER_LEN,
+            Message::AddOrderMPID { .. } => ADD_ORDER_MPID_LEN,
             Message::OrderExecuted { .. } => ORDER_EXECUTED_LEN,
+            Message::OrderExecutedWithPrice { .. } => ORDER_EXECUTED_PRICE_LEN,
             Message::OrderCancel { .. } => ORDER_CANCEL_LEN,
             Message::OrderDelete { .. } => ORDER_DELETE_LEN,
             Message::OrderReplace { .. } => ORDER_REPLACE_LEN,
@@ -225,6 +290,42 @@ impl Message {
         write_u64(out, 9, self.header().timestamp_ns);
         let o = HEADER_LEN;
         match self {
+            Message::SystemEvent { event_code, .. } => {
+                out[o] = *event_code;
+            }
+            Message::StockDirectory { symbol, .. } => {
+                out[o..o + SYMBOL_LEN].copy_from_slice(symbol);
+            }
+            Message::AddOrderMPID {
+                order_id,
+                side,
+                qty,
+                price,
+                mpid,
+                symbol,
+                ..
+            } => {
+                write_u64(out, o, *order_id);
+                out[o + 8] = side.to_byte();
+                write_u32(out, o + 9, *qty);
+                write_u64(out, o + 13, *price);
+                out[o + 21..o + 25].copy_from_slice(mpid);
+                out[o + 25..o + 31].copy_from_slice(symbol);
+            }
+            Message::OrderExecutedWithPrice {
+                order_id,
+                qty,
+                price,
+                match_id,
+                printable,
+                ..
+            } => {
+                write_u64(out, o, *order_id);
+                write_u32(out, o + 8, *qty);
+                write_u64(out, o + 12, *price);
+                write_u64(out, o + 20, *match_id);
+                out[o + 28] = if *printable { b'Y' } else { b'N' };
+            }
             Message::AddOrder {
                 order_id,
                 side,
@@ -308,8 +409,12 @@ impl Message {
         }
         let tag = buf[0];
         let want = match tag {
+            TAG_SYSTEM_EVENT => SYSTEM_EVENT_LEN,
+            TAG_STOCK_DIRECTORY => STOCK_DIRECTORY_LEN,
             TAG_ADD_ORDER => ADD_ORDER_LEN,
+            TAG_ADD_ORDER_MPID => ADD_ORDER_MPID_LEN,
             TAG_ORDER_EXECUTED => ORDER_EXECUTED_LEN,
+            TAG_ORDER_EXECUTED_PRICE => ORDER_EXECUTED_PRICE_LEN,
             TAG_ORDER_CANCEL => ORDER_CANCEL_LEN,
             TAG_ORDER_DELETE => ORDER_DELETE_LEN,
             TAG_ORDER_REPLACE => ORDER_REPLACE_LEN,
@@ -328,6 +433,35 @@ impl Message {
         };
         let o = HEADER_LEN;
         let msg = match tag {
+            TAG_SYSTEM_EVENT => Message::SystemEvent {
+                header,
+                event_code: buf[o],
+            },
+            TAG_STOCK_DIRECTORY => Message::StockDirectory {
+                header,
+                symbol: read_symbol(buf, o),
+            },
+            TAG_ADD_ORDER_MPID => Message::AddOrderMPID {
+                header,
+                order_id: read_u64(buf, o),
+                side: Side::from_byte(buf[o + 8]).ok_or(DecodeError::BadValue)?,
+                qty: read_u32(buf, o + 9),
+                price: read_u64(buf, o + 13),
+                mpid: read_mpid(buf, o + 21),
+                symbol: read_symbol(buf, o + 25),
+            },
+            TAG_ORDER_EXECUTED_PRICE => Message::OrderExecutedWithPrice {
+                header,
+                order_id: read_u64(buf, o),
+                qty: read_u32(buf, o + 8),
+                price: read_u64(buf, o + 12),
+                match_id: read_u64(buf, o + 20),
+                printable: match buf[o + 28] {
+                    b'Y' => true,
+                    b'N' => false,
+                    _ => return Err(DecodeError::BadValue),
+                },
+            },
             TAG_ADD_ORDER => Message::AddOrder {
                 header,
                 order_id: read_u64(buf, o),
@@ -386,6 +520,14 @@ mod tests {
 
     fn every_message() -> Vec<Message> {
         vec![
+            Message::SystemEvent {
+                header: hdr(0),
+                event_code: EVENT_START_OF_MARKET_HOURS,
+            },
+            Message::StockDirectory {
+                header: hdr(0),
+                symbol: symbol_bytes("AAPL"),
+            },
             Message::AddOrder {
                 header: hdr(1),
                 order_id: 42,
@@ -394,12 +536,29 @@ mod tests {
                 price: 152_340,
                 symbol: symbol_bytes("AAPL"),
             },
+            Message::AddOrderMPID {
+                header: hdr(1),
+                order_id: 43,
+                side: Side::Sell,
+                qty: 250,
+                price: 152_350,
+                mpid: *b"GSCO",
+                symbol: symbol_bytes("MSFT"),
+            },
             Message::OrderExecuted {
                 header: hdr(2),
                 order_id: 42,
                 qty: 200,
                 price: 152_340,
                 match_id: 9001,
+            },
+            Message::OrderExecutedWithPrice {
+                header: hdr(2),
+                order_id: 42,
+                qty: 100,
+                price: 152_341,
+                match_id: 9003,
+                printable: true,
             },
             Message::OrderCancel {
                 header: hdr(3),
@@ -486,6 +645,22 @@ mod tests {
         };
         let mut bytes = m.encode_to_vec();
         bytes[HEADER_LEN + 8] = b'?';
+        assert_eq!(Message::decode(&bytes), Err(DecodeError::BadValue));
+    }
+
+    #[test]
+    fn bad_printable_byte_errors_instead_of_panicking() {
+        let m = Message::OrderExecutedWithPrice {
+            header: hdr(9),
+            order_id: 1,
+            qty: 10,
+            price: 100,
+            match_id: 5,
+            printable: true,
+        };
+        let mut bytes = m.encode_to_vec();
+        let last = bytes.len() - 1;
+        bytes[last] = b'?';
         assert_eq!(Message::decode(&bytes), Err(DecodeError::BadValue));
     }
 
