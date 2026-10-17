@@ -7,6 +7,7 @@
 use crate::msg::{symbol_bytes, Header, Message, Side};
 
 const SYMBOLS: [&str; 6] = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA"];
+const MPIDS: [&str; 4] = ["GSCO", "MSCO", "JPMX", "UBSS"];
 
 pub struct StreamConfig {
     pub start_seq: u64,
@@ -53,6 +54,11 @@ fn random_symbol(rng: &mut Rng) -> [u8; 6] {
     symbol_bytes(SYMBOLS[rng.below(SYMBOLS.len() as u64) as usize])
 }
 
+fn random_mpid(rng: &mut Rng) -> [u8; 4] {
+    let b = MPIDS[rng.below(MPIDS.len() as u64) as usize].as_bytes();
+    [b[0], b[1], b[2], b[3]]
+}
+
 fn live_index(rng: &mut Rng, live: &[LiveOrder]) -> usize {
     rng.below(live.len() as u64) as usize
 }
@@ -77,16 +83,30 @@ fn add_order(
         side,
         symbol,
     });
-    Message::AddOrder {
-        header: Header {
-            seq,
-            timestamp_ns: ts,
-        },
-        order_id: id,
-        side,
-        qty,
-        price,
-        symbol,
+    let header = Header {
+        seq,
+        timestamp_ns: ts,
+    };
+    // About one add in five carries MPID attribution, like the real feed.
+    if rng.below(5) == 0 {
+        Message::AddOrderMPID {
+            header,
+            order_id: id,
+            side,
+            qty,
+            price,
+            mpid: random_mpid(rng),
+            symbol,
+        }
+    } else {
+        Message::AddOrder {
+            header,
+            order_id: id,
+            side,
+            qty,
+            price,
+            symbol,
+        }
     }
 }
 
@@ -104,15 +124,29 @@ fn execute_order(rng: &mut Rng, live: &mut Vec<LiveOrder>, seq: u64, ts: u64) ->
     if live[idx].qty == 0 {
         live.swap_remove(idx);
     }
-    Message::OrderExecuted {
-        header: Header {
-            seq,
-            timestamp_ns: ts,
-        },
-        order_id,
-        qty: q,
-        price,
-        match_id: rng.next(),
+    let header = Header {
+        seq,
+        timestamp_ns: ts,
+    };
+    // Some fills come back with an explicit execution price and a
+    // printable flag, others as plain executions.
+    if rng.below(3) == 0 {
+        Message::OrderExecutedWithPrice {
+            header,
+            order_id,
+            qty: q,
+            price,
+            match_id: rng.next(),
+            printable: rng.below(2) == 0,
+        }
+    } else {
+        Message::OrderExecuted {
+            header,
+            order_id,
+            qty: q,
+            price,
+            match_id: rng.next(),
+        }
     }
 }
 
