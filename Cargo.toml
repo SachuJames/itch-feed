@@ -1,0 +1,12 @@
+[package]
+name = "itch-feed"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "itch_feed"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sim"
+path = "src/bin/sim.rs"
