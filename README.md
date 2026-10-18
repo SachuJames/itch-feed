@@ -52,6 +52,31 @@ cargo run --bin sim -- --addr 127.0.0.1:5001 --count 1000 --rate 500
 The default target is the multicast group 239.0.0.1:5001. Where the host
 does not route multicast, pass `--addr 127.0.0.1:5001` and listen on that
 port locally. `--seed` pins the generated stream for repeat runs.
+`--stdout` writes the encoded bytes to stdout instead of UDP, which is what
+the receiver's pipe mode reads.
+
+## Running the receiver
+
+```sh
+cargo run --bin recv -- --addr 239.0.0.1:5001
+```
+
+This binds the port, joins the multicast group when the address is one,
+and feeds every datagram through framing plus the sequence tracker until
+`--count` messages arrive or the socket sits quiet for `--idle-secs`
+seconds (default 5). Where UDP is not available, pipe the simulator's
+bytes in instead:
+
+```sh
+cargo run --bin sim -- --stdout --count 5000 --seed 42 | cargo run --bin recv -- --pipe
+```
+
+At exit it prints the run stats, one fact per line: messages received,
+duplicates, gaps seen, open gaps (still missing, with the ranges kept
+internally), decode errors, and the last sequence number. A late arrival
+that lands inside a known gap closes it in the accounting; a gap that is
+seen is still reported even after it closes. Detection only: nothing here
+asks for retransmission yet.
 
 ## License
 
