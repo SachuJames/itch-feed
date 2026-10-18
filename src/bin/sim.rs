@@ -11,11 +11,12 @@ use std::process::exit;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn usage() -> ! {
-    eprintln!("usage: sim [--addr HOST:PORT] [--count N] [--rate N] [--seed N]");
+    eprintln!("usage: sim [--addr HOST:PORT] [--count N] [--rate N] [--seed N] [--stdout]");
     eprintln!("  --addr   destination, default 239.0.0.1:5001");
     eprintln!("  --count  messages to send, default 10000");
     eprintln!("  --rate   messages per second, default 1000");
     eprintln!("  --seed   generator seed, default is derived from the clock");
+    eprintln!("  --stdout write encoded bytes to stdout instead of UDP");
     exit(2);
 }
 
@@ -32,6 +33,7 @@ fn main() {
     let mut count: usize = 10_000;
     let mut rate: u64 = 1_000;
     let mut seed: Option<u64> = None;
+    let mut stdout = false;
 
     let args: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
@@ -65,6 +67,7 @@ fn main() {
                 }
                 seed = Some(parse_u64(&args[i]));
             }
+            "--stdout" => stdout = true,
             _ => usage(),
         }
         i += 1;
@@ -85,14 +88,32 @@ fn main() {
         base_timestamp_ns: base_ns,
     });
 
+    let mut buf = [0u8; 64]; // largest message is 52 bytes
+
+    if stdout {
+        // raw wire bytes on stdout, status on stderr so the pipe stays clean
+        use std::io::Write;
+        let mut out = std::io::stdout().lock();
+        for m in &stream {
+            let n = m
+                .encode(&mut buf)
+                .expect("64-byte buffer fits every message");
+            if let Err(e) = out.write_all(&buf[..n]) {
+                eprintln!("sim: stdout write failed: {e}");
+                exit(1);
+            }
+        }
+        eprintln!("sim: wrote {count} messages to stdout (seed {seed})");
+        return;
+    }
+
     let sock = UdpSocket::bind("0.0.0.0:0").unwrap_or_else(|e| {
         eprintln!("sim: bind failed: {e}");
         exit(1);
     });
 
+    eprintln!("sim: sending {count} messages to {addr} at ~{rate}/s (seed {seed})");
     let gap = Duration::from_nanos(1_000_000_000 / rate);
-    let mut buf = [0u8; 64]; // largest message is 52 bytes
-    println!("sim: sending {count} messages to {addr} at ~{rate}/s (seed {seed})");
     for m in &stream {
         let n = m
             .encode(&mut buf)
@@ -103,5 +124,5 @@ fn main() {
         }
         std::thread::sleep(gap);
     }
-    println!("sim: done, {count} messages sent");
+    eprintln!("sim: done, {count} messages sent");
 }

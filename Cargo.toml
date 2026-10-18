@@ -10,3 +10,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "sim"
 path = "src/bin/sim.rs"
+
+[[bin]]
+name = "recv"
+path = "src/bin/recv.rs"
