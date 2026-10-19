@@ -1,4 +1,5 @@
-//! Receive-side core: datagram framing, sequence tracking, and the socket loop.
+//! Receive-side core: datagram framing, the SPSC ring buffer, sequence
+//! tracking, and the socket loop.
 //!
 //! A datagram carries one or more back-to-back messages in the Day 1 wire
 //! format (1-byte tag, fixed length, big-endian). The sender emits exactly
@@ -6,11 +7,17 @@
 //! the bytes run out and errors on anything left over, instead of quietly
 //! dropping it.
 //!
+//! Decoded messages land in a lock-free SPSC ring buffer; the consumer
+//! side drains the ring into the sequence tracker. The ring sits between
+//! the two so the receive loop never waits on the consumer, and a full
+//! ring refuses the push (counted, not blocking, never overwriting).
+//!
 //! Everything here is transport independent except [`run_socket_loop`]:
-//! [`Receiver`] eats raw byte slices, so framing and the sequence tracker
-//! stay unit testable without a socket.
+//! [`Receiver`] eats raw byte slices, so framing, the ring, and the
+//! sequence tracker stay unit testable without a socket.
 
 use crate::msg::{DecodeError, Message};
+use crate::ring::RingBuffer;
 use std::fmt;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
@@ -185,40 +192,84 @@ pub struct RecvStats {
     pub gaps_seen: u64,
     pub open_gaps: u64,
     pub decode_errors: u64,
+    /// Messages refused by a full ring. They are dropped, never queued
+    /// over live data.
+    pub ring_overflows: u64,
     pub last_seq: u64,
 }
 
-/// Transport-independent receiver: feed it datagram bytes, it frames and
-/// tracks. Used by the socket loop, the pipe mode, and the tests.
-#[derive(Debug, Default)]
+/// Transport-independent receiver: feed it datagram bytes, it frames them
+/// and queues the messages in the ring; [`Receiver::drain`] moves queued
+/// messages into the sequence tracker. Used by the socket loop, the pipe
+/// mode, and the tests.
 pub struct Receiver {
+    ring: RingBuffer,
     tracker: SeqTracker,
     datagrams: u64,
     decode_errors: u64,
+    overflows: u64,
+}
+
+/// Ring slots for a fresh receiver. Enough to absorb a burst of datagrams
+/// between drains; at the largest message size this is well under a
+/// megabyte.
+const DEFAULT_RING_CAPACITY: usize = 4096;
+
+impl Default for Receiver {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Receiver {
     pub fn new() -> Self {
-        Receiver::default()
+        Self::with_capacity(DEFAULT_RING_CAPACITY)
     }
 
-    /// Frame one datagram and feed its messages to the sequence tracker.
-    /// Returns the number of messages in the datagram. A framing failure
-    /// counts a decode error and returns the error.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Receiver {
+            ring: RingBuffer::new(capacity),
+            tracker: SeqTracker::new(),
+            datagrams: 0,
+            decode_errors: 0,
+            overflows: 0,
+        }
+    }
+
+    /// Frame one datagram and push its messages into the ring.
+    /// Returns the number of messages queued. A framing failure counts a
+    /// decode error and returns the error; a full ring refuses the message
+    /// and counts an overflow. Nothing here blocks.
     pub fn handle_datagram(&mut self, buf: &[u8]) -> Result<usize, FrameError> {
         match decode_datagram(buf) {
             Ok(msgs) => {
-                for m in &msgs {
-                    self.tracker.observe(m.header().seq);
+                let mut queued = 0;
+                for m in msgs {
+                    if self.ring.try_push(m).is_ok() {
+                        queued += 1;
+                    } else {
+                        self.overflows += 1;
+                    }
                 }
                 self.datagrams += 1;
-                Ok(msgs.len())
+                Ok(queued)
             }
             Err(e) => {
                 self.decode_errors += 1;
                 Err(e)
             }
         }
+    }
+
+    /// Move every queued message from the ring into the sequence tracker.
+    /// Returns the number of messages drained.
+    pub fn drain(&mut self) -> usize {
+        let mut n = 0;
+        while let Some(m) = self.ring.try_pop() {
+            self.tracker.observe(m.header().seq);
+            n += 1;
+        }
+        n
     }
 
     pub fn stats(&self) -> RecvStats {
@@ -229,6 +280,7 @@ impl Receiver {
             gaps_seen: self.tracker.gaps_seen(),
             open_gaps: self.tracker.open_gaps(),
             decode_errors: self.decode_errors,
+            ring_overflows: self.overflows,
             last_seq: self.tracker.last_seq(),
         }
     }
@@ -268,6 +320,7 @@ pub fn run_socket_loop(addr: &str, opts: &SocketOpts) -> io::Result<RecvStats> {
         match sock.recv_from(&mut buf) {
             Ok((n, _)) => {
                 let _ = rx.handle_datagram(&buf[..n]);
+                rx.drain();
             }
             Err(e)
                 if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
@@ -396,11 +449,55 @@ mod tests {
         let mut rx = Receiver::new();
         let n = rx.handle_datagram(&delete(1).encode_to_vec()).unwrap();
         assert_eq!(n, 1);
+        // the message sits in the ring until drained into the tracker
+        assert_eq!(rx.drain(), 1);
         assert!(rx.handle_datagram(&[0x7Fu8; 17]).is_err());
         let s = rx.stats();
         assert_eq!(s.datagrams, 1);
         assert_eq!(s.received, 1);
         assert_eq!(s.decode_errors, 1);
+        assert_eq!(s.ring_overflows, 0);
+    }
+
+    #[test]
+    fn receiver_refuses_pushes_on_a_full_ring() {
+        let mut rx = Receiver::with_capacity(4);
+        for seq in 1..=4 {
+            rx.handle_datagram(&delete(seq).encode_to_vec()).unwrap();
+        }
+        // ring is full: the next message is refused and counted
+        rx.handle_datagram(&delete(5).encode_to_vec()).unwrap();
+        assert_eq!(rx.stats().ring_overflows, 1);
+        // the refused message never made it in; the queued four drain
+        // intact and in order
+        assert_eq!(rx.drain(), 4);
+        let s = rx.stats();
+        assert_eq!(s.received, 4);
+        assert_eq!(s.last_seq, 4);
+    }
+
+    #[test]
+    fn pipe_mode_flow_through_the_ring_shows_no_gaps() {
+        use crate::sim::{generate_stream, StreamConfig};
+        let cfg = StreamConfig {
+            start_seq: 1,
+            seed: 42,
+            count: 5_000,
+            base_timestamp_ns: 1_700_000_000_000_000_000,
+        };
+        let mut rx = Receiver::new();
+        for m in generate_stream(&cfg) {
+            // one message per datagram, the way the sim sends them
+            rx.handle_datagram(&m.encode_to_vec()).unwrap();
+            rx.drain(); // same cadence as the socket loop
+        }
+        let s = rx.stats();
+        assert_eq!(s.received, 5_000);
+        assert_eq!(s.duplicates, 0);
+        assert_eq!(s.gaps_seen, 0);
+        assert_eq!(s.open_gaps, 0);
+        assert_eq!(s.decode_errors, 0);
+        assert_eq!(s.ring_overflows, 0);
     }
 
     #[test]

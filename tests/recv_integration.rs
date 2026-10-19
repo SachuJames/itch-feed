@@ -22,6 +22,7 @@ fn generator_stream_recovers_clean_with_zero_gaps() {
             .handle_datagram(&m.encode_to_vec())
             .expect("valid datagram must frame");
         assert_eq!(n, 1); // sender emits one message per datagram
+        rx.drain();
     }
     let s = rx.stats();
     assert_eq!(s.datagrams, 2000);
@@ -44,6 +45,7 @@ fn injected_gap_is_reported() {
             continue; // drop ten messages mid-stream
         }
         rx.handle_datagram(&m.encode_to_vec()).unwrap();
+        rx.drain();
     }
     let s = rx.stats();
     assert_eq!(s.received, 1990);
@@ -67,10 +69,12 @@ fn late_fill_after_the_gap_closes_it() {
             continue;
         }
         rx.handle_datagram(&m.encode_to_vec()).unwrap();
+        rx.drain();
     }
     assert_eq!(rx.stats().open_gaps, 10);
     for d in held {
         rx.handle_datagram(&d).unwrap(); // the "retransmit" arrives late
+        rx.drain();
     }
     let s = rx.stats();
     assert_eq!(s.received, 2000);

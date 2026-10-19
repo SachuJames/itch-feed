@@ -260,10 +260,9 @@ pub fn generate_stream(cfg: &StreamConfig) -> Vec<Message> {
     let mut out = Vec::with_capacity(cfg.count);
     let mut live: Vec<LiveOrder> = Vec::new();
     let mut next_id: u64 = 1;
-    let mut seq = cfg.start_seq;
     let mut ts = cfg.base_timestamp_ns;
 
-    for _ in 0..cfg.count {
+    for seq in (cfg.start_seq..).take(cfg.count) {
         let msg = if live.len() < 8 {
             // warm up the book before any fills or cancels can happen
             add_order(&mut rng, &mut live, &mut next_id, seq, ts)
@@ -278,7 +277,6 @@ pub fn generate_stream(cfg: &StreamConfig) -> Vec<Message> {
             }
         };
         out.push(msg);
-        seq += 1;
         ts += rng.below(2000);
     }
     out

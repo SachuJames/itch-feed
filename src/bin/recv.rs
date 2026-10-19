@@ -82,6 +82,7 @@ fn main() {
         if let Err(e) = rx.handle_datagram(&bytes) {
             eprintln!("recv: frame error: {e}");
         }
+        rx.drain();
         rx.stats()
     } else {
         match run_socket_loop(&addr, &SocketOpts { count, idle_secs }) {
@@ -99,5 +100,6 @@ fn main() {
     println!("recv: gaps seen: {}", stats.gaps_seen);
     println!("recv: open gaps: {}", stats.open_gaps);
     println!("recv: decode errors: {}", stats.decode_errors);
+    println!("recv: ring overflows: {}", stats.ring_overflows);
     println!("recv: last sequence: {}", stats.last_seq);
 }
