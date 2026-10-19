@@ -2,25 +2,23 @@
 
 An ITCH-style market data feed handler in Rust. A UDP multicast simulator
 publishes sequenced binary messages; the handler consumes them through a
-lock-free SPSC ring buffer, watches for sequence gaps, and requests
-retransmission instead of silently losing data.
+lock-free SPSC ring buffer and watches for sequence gaps instead of
+silently losing data. Retransmission requests are still open work.
 
-## Plan
+## Still open
 
-- Binary message codec for a small ITCH-like message set (system event,
-  stock directory, add, add with MPID, execute, execute with price,
-  cancel, delete, replace, trade).
-- Multicast simulator that replays a message stream over UDP, with knobs
-  for packet loss and reordering so the recovery paths actually get used.
-- Lock-free SPSC ring buffer between the receive loop and the consumer.
-- Sequence-gap detection with a retransmit request channel, plus counters
-  for gaps seen, retransmits requested, and messages recovered or lost.
+Sequence-gap detection works and reports gaps, but nothing asks for
+retransmission yet: a request channel off the gap detector, plus counters
+for retransmits requested and messages recovered or lost, is the remaining
+piece.
 
 ## Status
 
-The binary codec for the ten message types is in, and a UDP simulator
-emits a sequenced synthetic stream. The ring buffer and gap recovery are
-still open work.
+The codec, the simulator, framing, and the sequence tracker are in.
+Decoded messages flow through a lock-free SPSC ring buffer between the
+socket loop and the consumer: fixed capacity, no locks, no allocation
+after construction. A full ring refuses the push and counts an overflow
+instead of blocking or overwriting queued data.
 
 ## Wire format
 
@@ -62,10 +60,10 @@ cargo run --bin recv -- --addr 239.0.0.1:5001
 ```
 
 This binds the port, joins the multicast group when the address is one,
-and feeds every datagram through framing plus the sequence tracker until
-`--count` messages arrive or the socket sits quiet for `--idle-secs`
-seconds (default 5). Where UDP is not available, pipe the simulator's
-bytes in instead:
+frames every datagram, queues the decoded messages into the ring, and
+drains the ring into the sequence tracker until `--count` messages arrive
+or the socket sits quiet for `--idle-secs` seconds (default 5). Where UDP
+is not available, pipe the simulator's bytes in instead:
 
 ```sh
 cargo run --bin sim -- --stdout --count 5000 --seed 42 | cargo run --bin recv -- --pipe
@@ -73,7 +71,7 @@ cargo run --bin sim -- --stdout --count 5000 --seed 42 | cargo run --bin recv --
 
 At exit it prints the run stats, one fact per line: messages received,
 duplicates, gaps seen, open gaps (still missing, with the ranges kept
-internally), decode errors, and the last sequence number. A late arrival
+internally), decode errors, ring overflows, and the last sequence number. A late arrival
 that lands inside a known gap closes it in the accounting; a gap that is
 seen is still reported even after it closes. Detection only: nothing here
 asks for retransmission yet.
