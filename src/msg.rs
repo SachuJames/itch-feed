@@ -82,7 +82,7 @@ pub struct Header {
     pub timestamp_ns: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Message {
     SystemEvent {
         header: Header,
