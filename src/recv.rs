@@ -72,13 +72,33 @@ pub fn decode_datagram(buf: &[u8]) -> Result<Vec<Message>, FrameError> {
     Ok(out)
 }
 
+/// An inclusive range of sequence numbers the tracker has asked to have
+/// resent. One is emitted when a gap opens, and never again for the same
+/// range: there is no re-request policy, so a range that stays open is
+/// simply counted as lost at the end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetransmitRequest {
+    pub start: u64,
+    pub end: u64,
+}
+
+impl RetransmitRequest {
+    /// How many messages the range covers.
+    pub fn count(&self) -> u64 {
+        self.end - self.start + 1
+    }
+}
+
 /// Tracks the message stream's sequence numbers in arrival order.
 ///
 /// The first message seen sets the window; nothing before it is treated as
-/// a gap. A jump forward opens a gap (a missing range); a late arrival that
-/// lands inside a known missing range closes that part of the gap. A message
-/// already seen, and not missing, counts as a duplicate. Recovery and
-/// retransmit are out of scope: this only detects and reports.
+/// a gap. A jump forward opens a gap (a missing range) and returns a
+/// [`RetransmitRequest`] for it; a late arrival that lands inside a known
+/// missing range closes that part of the gap and counts as recovered,
+/// since every open range was requested the moment it opened. A message
+/// already seen, and not missing, counts as a duplicate. What happens to
+/// a request after it leaves here is the caller's business: the tracker
+/// only decides what is missing.
 #[derive(Debug, Default)]
 pub struct SeqTracker {
     started: bool,
@@ -86,6 +106,8 @@ pub struct SeqTracker {
     received: u64,
     duplicates: u64,
     gaps_seen: u64,
+    retransmit_requests: u64,
+    recovered: u64,
     /// Sorted, disjoint ranges of sequence numbers known to be missing.
     missing: Vec<(u64, u64)>,
     last_seq: u64,
@@ -96,38 +118,48 @@ impl SeqTracker {
         SeqTracker::default()
     }
 
-    /// Observe one message sequence number.
-    pub fn observe(&mut self, seq: u64) {
+    /// Observe one message sequence number. Returns a retransmit request
+    /// when this arrival opens a new gap, and `None` otherwise.
+    pub fn observe(&mut self, seq: u64) -> Option<RetransmitRequest> {
         if !self.started {
             self.started = true;
             self.expected = seq.wrapping_add(1);
             self.received = 1;
             self.last_seq = seq;
-            return;
+            return None;
         }
         if self.last_seq < seq {
             self.last_seq = seq;
         }
         if let Some(idx) = self.find_missing(seq) {
-            // Late arrival inside a known gap: close that slot.
+            // Late arrival inside a known gap: close that slot. The range
+            // was requested when it opened, so the fill counts as recovered.
             self.remove_missing(idx, seq);
             self.received += 1;
-            return;
+            self.recovered += 1;
+            return None;
         }
         if seq < self.expected {
             self.duplicates += 1;
-            return;
+            return None;
         }
         if seq == self.expected {
             self.expected = seq.wrapping_add(1);
             self.received += 1;
-            return;
+            return None;
         }
-        // seq > expected: a gap opened between expected and seq.
-        self.missing.push((self.expected, seq.wrapping_sub(1)));
+        // seq > expected: a gap opened between expected and seq. Ask for
+        // exactly that range, once.
+        let req = RetransmitRequest {
+            start: self.expected,
+            end: seq.wrapping_sub(1),
+        };
+        self.missing.push((req.start, req.end));
         self.gaps_seen += 1;
+        self.retransmit_requests += 1;
         self.expected = seq.wrapping_add(1);
         self.received += 1;
+        Some(req)
     }
 
     fn find_missing(&self, seq: u64) -> Option<usize> {
@@ -164,6 +196,22 @@ impl SeqTracker {
         self.gaps_seen
     }
 
+    /// Retransmit requests emitted: one per gap, at the moment it opened.
+    pub fn retransmit_requests(&self) -> u64 {
+        self.retransmit_requests
+    }
+
+    /// Late arrivals that filled a slot in a requested gap.
+    pub fn messages_recovered(&self) -> u64 {
+        self.recovered
+    }
+
+    /// Messages still missing. Read at the end of a run this is the lost
+    /// count: nothing more is coming to fill them.
+    pub fn messages_lost(&self) -> u64 {
+        self.open_gaps()
+    }
+
     /// Sequence numbers still missing, i.e. gaps never filled.
     pub fn open_gaps(&self) -> u64 {
         self.missing.iter().map(|&(lo, hi)| hi - lo + 1).sum()
@@ -191,6 +239,10 @@ pub struct RecvStats {
     pub duplicates: u64,
     pub gaps_seen: u64,
     pub open_gaps: u64,
+    pub retransmit_requests: u64,
+    pub messages_recovered: u64,
+    /// Sequence numbers still missing when the stats were taken.
+    pub messages_lost: u64,
     pub decode_errors: u64,
     /// Messages refused by a full ring. They are dropped, never queued
     /// over live data.
@@ -205,6 +257,7 @@ pub struct RecvStats {
 pub struct Receiver {
     ring: RingBuffer,
     tracker: SeqTracker,
+    requests: Vec<RetransmitRequest>,
     datagrams: u64,
     decode_errors: u64,
     overflows: u64,
@@ -230,6 +283,7 @@ impl Receiver {
         Receiver {
             ring: RingBuffer::new(capacity),
             tracker: SeqTracker::new(),
+            requests: Vec::new(),
             datagrams: 0,
             decode_errors: 0,
             overflows: 0,
@@ -262,14 +316,23 @@ impl Receiver {
     }
 
     /// Move every queued message from the ring into the sequence tracker.
-    /// Returns the number of messages drained.
+    /// Retransmit requests the tracker emits along the way are collected
+    /// for [`Receiver::requests`]. Returns the number of messages drained.
     pub fn drain(&mut self) -> usize {
         let mut n = 0;
         while let Some(m) = self.ring.try_pop() {
-            self.tracker.observe(m.header().seq);
+            if let Some(req) = self.tracker.observe(m.header().seq) {
+                self.requests.push(req);
+            }
             n += 1;
         }
         n
+    }
+
+    /// Every retransmit request emitted so far, in the order the gaps
+    /// opened.
+    pub fn requests(&self) -> &[RetransmitRequest] {
+        &self.requests
     }
 
     pub fn stats(&self) -> RecvStats {
@@ -279,6 +342,9 @@ impl Receiver {
             duplicates: self.tracker.duplicates(),
             gaps_seen: self.tracker.gaps_seen(),
             open_gaps: self.tracker.open_gaps(),
+            retransmit_requests: self.tracker.retransmit_requests(),
+            messages_recovered: self.tracker.messages_recovered(),
+            messages_lost: self.tracker.messages_lost(),
             decode_errors: self.decode_errors,
             ring_overflows: self.overflows,
             last_seq: self.tracker.last_seq(),
@@ -442,6 +508,91 @@ mod tests {
                                       // duplicates after the fill are still duplicates
         t.observe(4);
         assert_eq!(t.duplicates(), 1);
+    }
+
+    #[test]
+    fn tracker_emits_one_request_when_a_gap_opens() {
+        let mut t = SeqTracker::new();
+        assert_eq!(t.observe(1), None);
+        assert_eq!(t.observe(2), None);
+        let req = t.observe(7).expect("the jump to 7 opens a gap");
+        assert_eq!(req, RetransmitRequest { start: 3, end: 6 });
+        assert_eq!(req.count(), 4);
+        assert_eq!(t.retransmit_requests(), 1);
+    }
+
+    #[test]
+    fn tracker_does_not_reemit_while_a_gap_stays_open() {
+        let mut t = SeqTracker::new();
+        for seq in [1, 2, 7] {
+            t.observe(seq);
+        }
+        // more in-order traffic, plus a duplicate of an old message:
+        // neither touches the open range, so neither asks again
+        assert_eq!(t.observe(8), None);
+        assert_eq!(t.observe(9), None);
+        assert_eq!(t.observe(2), None);
+        assert_eq!(t.retransmit_requests(), 1);
+        assert_eq!(t.duplicates(), 1);
+    }
+
+    #[test]
+    fn tracker_counts_a_late_fill_as_recovered() {
+        let mut t = SeqTracker::new();
+        for seq in [1, 2, 3, 7] {
+            t.observe(seq);
+        }
+        assert_eq!(t.messages_recovered(), 0);
+        assert_eq!(t.messages_lost(), 3);
+        for seq in [4, 6, 5] {
+            t.observe(seq);
+        }
+        assert_eq!(t.messages_recovered(), 3);
+        assert_eq!(t.messages_lost(), 0);
+        assert_eq!(t.open_gaps(), 0);
+    }
+
+    #[test]
+    fn tracker_requests_each_gap_separately() {
+        let mut t = SeqTracker::new();
+        let mut reqs = Vec::new();
+        for seq in [1, 4, 5, 9] {
+            if let Some(r) = t.observe(seq) {
+                reqs.push(r);
+            }
+        }
+        assert_eq!(
+            reqs,
+            [
+                RetransmitRequest { start: 2, end: 3 },
+                RetransmitRequest { start: 6, end: 8 },
+            ]
+        );
+        assert_eq!(t.retransmit_requests(), 2);
+        assert_eq!(t.messages_lost(), 5);
+    }
+
+    #[test]
+    fn receiver_collects_requests_from_the_tracker() {
+        let mut rx = Receiver::new();
+        for seq in [1, 2, 3, 7, 8] {
+            rx.handle_datagram(&delete(seq).encode_to_vec()).unwrap();
+            rx.drain();
+        }
+        assert_eq!(rx.requests(), &[RetransmitRequest { start: 4, end: 6 }]);
+        let s = rx.stats();
+        assert_eq!(s.retransmit_requests, 1);
+        assert_eq!(s.messages_recovered, 0);
+        assert_eq!(s.messages_lost, 3);
+        // the retransmit arrives and closes the gap
+        for seq in [4, 5, 6] {
+            rx.handle_datagram(&delete(seq).encode_to_vec()).unwrap();
+            rx.drain();
+        }
+        let s = rx.stats();
+        assert_eq!(s.messages_recovered, 3);
+        assert_eq!(s.messages_lost, 0);
+        assert_eq!(s.received, 8);
     }
 
     #[test]
