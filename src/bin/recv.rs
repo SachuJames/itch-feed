@@ -71,6 +71,7 @@ fn main() {
         i += 1;
     }
 
+    let mut request_lines: Vec<String> = Vec::new();
     let stats = if pipe {
         let mut stdin = std::io::stdin().lock();
         let mut bytes = Vec::new();
@@ -83,6 +84,15 @@ fn main() {
             eprintln!("recv: frame error: {e}");
         }
         rx.drain();
+        // what the tracker asked to have resent, in the order it asked
+        for req in rx.requests() {
+            request_lines.push(format!(
+                "recv: retransmit request: seq {}-{} ({} messages)",
+                req.start,
+                req.end,
+                req.count()
+            ));
+        }
         rx.stats()
     } else {
         match run_socket_loop(&addr, &SocketOpts { count, idle_secs }) {
@@ -94,11 +104,17 @@ fn main() {
         }
     };
 
+    for line in &request_lines {
+        println!("{line}");
+    }
     println!("recv: datagrams: {}", stats.datagrams);
     println!("recv: messages received: {}", stats.received);
     println!("recv: duplicates: {}", stats.duplicates);
     println!("recv: gaps seen: {}", stats.gaps_seen);
     println!("recv: open gaps: {}", stats.open_gaps);
+    println!("recv: retransmit requests: {}", stats.retransmit_requests);
+    println!("recv: messages recovered: {}", stats.messages_recovered);
+    println!("recv: messages lost: {}", stats.messages_lost);
     println!("recv: decode errors: {}", stats.decode_errors);
     println!("recv: ring overflows: {}", stats.ring_overflows);
     println!("recv: last sequence: {}", stats.last_seq);
