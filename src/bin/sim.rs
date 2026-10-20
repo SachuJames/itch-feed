@@ -4,19 +4,21 @@
 //! is the multicast group 239.0.0.1:5001; where the host does not route
 //! multicast, pass --addr 127.0.0.1:5001 and listen locally instead.
 
-use itch_feed::sim::{generate_stream, StreamConfig};
+use itch_feed::sim::{apply_loss, generate_stream, StreamConfig};
 use std::env;
 use std::net::UdpSocket;
 use std::process::exit;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn usage() -> ! {
-    eprintln!("usage: sim [--addr HOST:PORT] [--count N] [--rate N] [--seed N] [--stdout]");
-    eprintln!("  --addr   destination, default 239.0.0.1:5001");
-    eprintln!("  --count  messages to send, default 10000");
-    eprintln!("  --rate   messages per second, default 1000");
-    eprintln!("  --seed   generator seed, default is derived from the clock");
-    eprintln!("  --stdout write encoded bytes to stdout instead of UDP");
+    eprintln!("usage: sim [--addr HOST:PORT] [--count N] [--rate N] [--seed N] [--drop-rate P] [--reorder W] [--stdout]");
+    eprintln!("  --addr      destination, default 239.0.0.1:5001");
+    eprintln!("  --count     messages to send, default 10000");
+    eprintln!("  --rate      messages per second, default 1000");
+    eprintln!("  --seed      generator seed, default is derived from the clock");
+    eprintln!("  --drop-rate percent of messages to drop, 0 to 100, default 0");
+    eprintln!("  --reorder   shuffle window for out-of-order delivery, default 0 (off)");
+    eprintln!("  --stdout    write encoded bytes to stdout instead of UDP");
     exit(2);
 }
 
@@ -33,6 +35,8 @@ fn main() {
     let mut count: usize = 10_000;
     let mut rate: u64 = 1_000;
     let mut seed: Option<u64> = None;
+    let mut drop_rate: u64 = 0;
+    let mut reorder: usize = 0;
     let mut stdout = false;
 
     let args: Vec<String> = env::args().skip(1).collect();
@@ -67,6 +71,23 @@ fn main() {
                 }
                 seed = Some(parse_u64(&args[i]));
             }
+            "--drop-rate" => {
+                i += 1;
+                if i >= args.len() {
+                    usage()
+                }
+                drop_rate = parse_u64(&args[i]);
+                if drop_rate > 100 {
+                    usage()
+                }
+            }
+            "--reorder" => {
+                i += 1;
+                if i >= args.len() {
+                    usage()
+                }
+                reorder = parse_usize(&args[i]);
+            }
             "--stdout" => stdout = true,
             _ => usage(),
         }
@@ -81,12 +102,26 @@ fn main() {
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
     let seed = seed.unwrap_or_else(|| base_ns ^ (std::process::id() as u64));
-    let stream = generate_stream(&StreamConfig {
+    let generated = generate_stream(&StreamConfig {
         start_seq: 1,
         seed,
         count,
         base_timestamp_ns: base_ns,
     });
+    // The knobs work on the generated list, so the stdout and UDP paths
+    // lose and shuffle exactly the same messages for a given seed.
+    let loss = apply_loss(generated, drop_rate, reorder, seed);
+    if drop_rate > 0 || reorder > 1 {
+        eprintln!(
+            "sim: loss knobs: {} dropped ({}%), {} moved (window {})",
+            loss.dropped.len(),
+            drop_rate,
+            loss.moved,
+            reorder
+        );
+    }
+    let stream = loss.messages;
+    let count = stream.len();
 
     let mut buf = [0u8; 64]; // largest message is 52 bytes
 

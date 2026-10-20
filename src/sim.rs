@@ -282,6 +282,77 @@ pub fn generate_stream(cfg: &StreamConfig) -> Vec<Message> {
     out
 }
 
+/// What the loss knobs did to a generated stream.
+pub struct LossOutcome {
+    /// The messages that go out, in emission order.
+    pub messages: Vec<Message>,
+    /// Sequence numbers dropped before sending, ascending.
+    pub dropped: Vec<u64>,
+    /// Messages emitted somewhere other than their sequence position.
+    pub moved: usize,
+}
+
+/// Rough up a generated stream the way a lossy network would, so the
+/// receiver's gap handling has something to chew on.
+///
+/// Determinism contract: the same (stream, drop_percent, reorder_window,
+/// seed) always gives the same outcome. Draws come from a xorshift RNG
+/// seeded from `seed`, consumed in a fixed order: one draw per message in
+/// sequence order for the drop decision, then a Fisher-Yates shuffle per
+/// reorder chunk. Nothing is dropped at 0 percent; nothing moves with a
+/// window under 2.
+///
+/// Reorder works in chunks of `reorder_window` consecutive survivors: a
+/// message can arrive early or late, but never outside its own chunk, so
+/// the displacement stays under the window.
+pub fn apply_loss(
+    stream: Vec<Message>,
+    drop_percent: u64,
+    reorder_window: usize,
+    seed: u64,
+) -> LossOutcome {
+    let mut rng = Rng((seed ^ 0x9E37_79B9_7F4A_7C15) | 1);
+
+    let mut survivors: Vec<Message> = Vec::with_capacity(stream.len());
+    let mut dropped: Vec<u64> = Vec::new();
+    for m in stream {
+        if drop_percent > 0 && rng.below(100) < drop_percent {
+            dropped.push(m.header().seq);
+        } else {
+            survivors.push(m);
+        }
+    }
+
+    let mut moved = 0;
+    if reorder_window > 1 {
+        // Tag each survivor with where it started so the shuffle can
+        // count what it displaced.
+        let mut tagged: Vec<(usize, Message)> = survivors.into_iter().enumerate().collect();
+        for chunk in tagged.chunks_mut(reorder_window) {
+            for i in (1..chunk.len()).rev() {
+                let j = rng.below(i as u64 + 1) as usize;
+                chunk.swap(i, j);
+            }
+        }
+        survivors = tagged
+            .into_iter()
+            .enumerate()
+            .map(|(pos, (origin, m))| {
+                if origin != pos {
+                    moved += 1;
+                }
+                m
+            })
+            .collect();
+    }
+
+    LossOutcome {
+        messages: survivors,
+        dropped,
+        moved,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,5 +395,74 @@ mod tests {
             assert_eq!(n, bytes.len());
             assert_eq!(d, m);
         }
+    }
+
+    #[test]
+    fn loss_with_no_knobs_changes_nothing() {
+        let s = generate_stream(&cfg());
+        let out = apply_loss(s.clone(), 0, 0, 7);
+        assert_eq!(out.messages, s);
+        assert!(out.dropped.is_empty());
+        assert_eq!(out.moved, 0);
+    }
+
+    #[test]
+    fn loss_is_deterministic_for_a_seed() {
+        let c = StreamConfig {
+            count: 500,
+            ..cfg()
+        };
+        let a = apply_loss(generate_stream(&c), 10, 8, 99);
+        let b = apply_loss(generate_stream(&c), 10, 8, 99);
+        assert_eq!(a.messages, b.messages);
+        assert_eq!(a.dropped, b.dropped);
+        assert_eq!(a.moved, b.moved);
+    }
+
+    #[test]
+    fn drop_at_100_percent_takes_everything() {
+        let out = apply_loss(generate_stream(&cfg()), 100, 0, 7);
+        assert!(out.messages.is_empty());
+        assert_eq!(out.dropped.len(), 300);
+    }
+
+    #[test]
+    fn dropped_seqs_are_the_ones_missing_from_the_output() {
+        let c = StreamConfig {
+            count: 500,
+            ..cfg()
+        };
+        let out = apply_loss(generate_stream(&c), 25, 0, 3);
+        assert!(!out.dropped.is_empty());
+        assert_eq!(out.messages.len() + out.dropped.len(), 500);
+        let sent: Vec<u64> = out.messages.iter().map(|m| m.header().seq).collect();
+        for seq in &out.dropped {
+            assert!(!sent.contains(seq));
+        }
+        // no reorder: what survives keeps its order
+        let mut sorted = sent.clone();
+        sorted.sort_unstable();
+        assert_eq!(sent, sorted);
+    }
+
+    #[test]
+    fn reorder_stays_inside_its_window() {
+        let c = StreamConfig {
+            count: 500,
+            ..cfg()
+        };
+        let window = 8;
+        let out = apply_loss(generate_stream(&c), 0, window, 5);
+        assert_eq!(out.messages.len(), 500);
+        assert!(out.moved > 0);
+        // same messages, permuted: position of every seq stays within
+        // one window of where it started
+        for (pos, m) in out.messages.iter().enumerate() {
+            let origin = (m.header().seq - 500) as usize;
+            assert!(origin.abs_diff(pos) < window);
+        }
+        let mut seqs: Vec<u64> = out.messages.iter().map(|m| m.header().seq).collect();
+        seqs.sort_unstable();
+        assert_eq!(seqs, (500..1000).collect::<Vec<_>>());
     }
 }
