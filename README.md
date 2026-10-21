@@ -108,10 +108,11 @@ is not available, pipe the simulator's bytes in instead:
 cargo run --bin sim -- --stdout --count 5000 --seed 42 | cargo run --bin recv -- --pipe
 ```
 
-At exit it prints the run stats, one fact per line: messages received,
-duplicates, gaps seen, open gaps (still missing, with the ranges kept
-internally), retransmit requests, messages recovered, messages lost,
-decode errors, ring overflows, and the last sequence number. In pipe
+At exit it prints the run stats, one fact per line: datagrams,
+messages received, duplicates, gaps seen, open gaps (still missing,
+with the ranges kept internally), retransmit requests, messages
+recovered, messages lost, decode errors, ring overflows, and the last
+sequence number. In pipe
 mode it also lists each retransmit request as it stands at exit, in the
 order the gaps opened. A late arrival that lands inside a known gap
 closes it in the accounting; a gap that is seen is still reported even
@@ -122,19 +123,34 @@ after it closes.
 Measured with criterion 0.5.1, release build (rustc 1.99.0), on
 2026-10-21, on a 2-vCPU cloud VM with 7.8 GB RAM. Every bench builds its
 inputs before the clock starts and times only the operation; the
-harnesses live in `benches/feed.rs`.
+harnesses live in `benches/feed.rs`. All of these numbers cover
+in-process paths only. The UDP socket itself is not in any of them, and
+could not be: UDP is blocked in the environment these were measured in,
+as the Limits section below explains.
 
-Decoding a representative mix of all ten message types runs at about 83
-million messages a second, roughly 12 ns a message. The ring on its own
-is quicker than the codec: a push followed by a pop costs about 10 ns a
-message single-threaded, around 99 million a second. The full receive
-path (frame a datagram, decode it, queue in the ring, drain into the
-sequence tracker) lands at about 13 million messages a second on a clean
-stream, roughly 77 ns a message, which leaves plenty of headroom over
-anything one UDP socket is likely to deliver. The shared VM shows up as
-a high tail in the samples, about one measurement in six flagged as an
-outlier on the decode and receiver benches, so read the absolute numbers
-as a guide rather than a promise.
+Decoding a representative mix of all ten message types runs at about
+110 million messages a second, roughly 9 ns a message. Encoding the same
+mix into a reused buffer is the slower direction, about 53 million a
+second or 19 ns a message: it writes field by field where the decoder
+mostly reads them back. The ring on its own is in the same league as the
+codec single-threaded, a push followed by a pop at about 13 ns a
+message, near 77 million a second. Across two threads, producer pushing
+while the consumer pops, the same ring hands over about 10 million
+messages a second, roughly 100 ns each, with a wide spread between runs:
+the two threads share this VM's two cores with everything else on it.
+
+The sequence tracker is the cheapest part of the path. Observing an
+in-order stream costs about 5.6 ns a message. A stream built to hurt it,
+every block of 500 messages rotated so each block opens a gap and the
+late arrival then fills it, costs about 7.6 ns a message: the gap work
+is real but small next to everything around it. That bench also had the
+noisiest samples of the set, about one measurement in five flagged as an
+outlier, so treat its figure as the roughest here.
+
+The full receive path (frame a datagram, decode it, queue in the ring,
+drain into the sequence tracker) lands at about 11 million messages a
+second on a clean stream, roughly 89 ns a message, which leaves plenty
+of headroom over anything one UDP socket is likely to deliver.
 
 ## Limits
 
