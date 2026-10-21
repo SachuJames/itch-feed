@@ -12,6 +12,7 @@
 //!
 //! Run stats print to stdout at exit, one fact per line.
 
+use itch_feed::msg::Message;
 use itch_feed::recv::{run_socket_loop, Receiver, SocketOpts};
 use std::env;
 use std::io::Read;
@@ -80,10 +81,29 @@ fn main() {
             exit(1);
         }
         let mut rx = Receiver::new();
-        if let Err(e) = rx.handle_datagram(&bytes) {
-            eprintln!("recv: frame error: {e}");
+        // The pipe carries datagrams back to back with nothing between
+        // them, so the only framing on the stream is the messages
+        // themselves: walk the buffer one message at a time and feed each
+        // as its own datagram, draining as we go. Feeding the whole input
+        // at once would queue every message before the first drain and
+        // overflow the ring on any stream longer than its capacity.
+        let mut offset = 0;
+        while offset < bytes.len() {
+            match Message::decode(&bytes[offset..]) {
+                Ok((_, n)) => {
+                    if let Err(e) = rx.handle_datagram(&bytes[offset..offset + n]) {
+                        eprintln!("recv: frame error: {e}");
+                        break;
+                    }
+                    rx.drain();
+                    offset += n;
+                }
+                Err(e) => {
+                    eprintln!("recv: decode failed at byte {offset}: {e}");
+                    break;
+                }
+            }
         }
-        rx.drain();
         // what the tracker asked to have resent, in the order it asked
         for req in rx.requests() {
             request_lines.push(format!(
