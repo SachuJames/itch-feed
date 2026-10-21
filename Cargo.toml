@@ -14,3 +14,10 @@ path = "src/bin/sim.rs"
 [[bin]]
 name = "recv"
 path = "src/bin/recv.rs"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "feed"
+harness = false
