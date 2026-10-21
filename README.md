@@ -5,13 +5,14 @@ publishes sequenced binary messages; the handler consumes them through a
 lock-free SPSC ring buffer, watches for sequence gaps, and asks for the
 missing ranges to be resent instead of silently losing data.
 
-## Status
+## The receive path
 
-The codec, the simulator, framing, and the sequence tracker are in.
-Decoded messages flow through a lock-free SPSC ring buffer between the
-socket loop and the consumer: fixed capacity, no locks, no allocation
-after construction. A full ring refuses the push and counts an overflow
-instead of blocking or overwriting queued data.
+Datagrams are framed and decoded, and the messages queue in a lock-free
+SPSC ring buffer between the socket loop and the consumer: fixed
+capacity, no locks, no allocation after construction. The consumer drains
+the ring into the sequence tracker. A full ring refuses the push and
+counts an overflow instead of blocking or overwriting queued data, so a
+slow consumer loses new arrivals, never data already queued.
 
 ## Gap recovery
 
@@ -115,6 +116,36 @@ mode it also lists each retransmit request as it stands at exit, in the
 order the gaps opened. A late arrival that lands inside a known gap
 closes it in the accounting; a gap that is seen is still reported even
 after it closes.
+
+## Performance
+
+Measured with criterion 0.5.1, release build (rustc 1.99.0), on
+2026-10-21, on a 2-vCPU cloud VM with 7.8 GB RAM. Every bench builds its
+inputs before the clock starts and times only the operation; the
+harnesses live in `benches/feed.rs`.
+
+Decoding a representative mix of all ten message types runs at about 83
+million messages a second, roughly 12 ns a message. The ring on its own
+is quicker than the codec: a push followed by a pop costs about 10 ns a
+message single-threaded, around 99 million a second. The full receive
+path (frame a datagram, decode it, queue in the ring, drain into the
+sequence tracker) lands at about 13 million messages a second on a clean
+stream, roughly 77 ns a message, which leaves plenty of headroom over
+anything one UDP socket is likely to deliver. The shared VM shows up as
+a high tail in the samples, about one measurement in six flagged as an
+outlier on the decode and receiver benches, so read the absolute numbers
+as a guide rather than a promise.
+
+## Limits
+
+Two honest ones. The UDP path has never run over a real network in the
+environment this was built in (UDP sends are blocked there), so the
+socket code is verified by compilation, unit tests, and the pipe path
+rather than by live traffic. And the retransmit requests the receiver
+emits are printed and counted, but nothing in the two binaries answers
+them yet: closing the loop needs a sender that keeps the stream around
+to resend from, which the simulator currently only does inside the
+tests.
 
 ## License
 
