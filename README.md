@@ -2,10 +2,10 @@
 
 <img src="docs/assets/banner.svg" alt="itch-feed: ITCH 5.0 feed handler in Rust" width="100%"/>
 
-<img src="https://img.shields.io/badge/rust-1.99-1c2128?logo=rust&logoColor=white" alt="Rust 1.99"/>
-<img src="https://img.shields.io/badge/protocol-ITCH%205.0-1c2128" alt="ITCH 5.0"/>
-<img src="https://img.shields.io/badge/tests-47%20passing-1c2128" alt="47 tests passing"/>
-<img src="https://img.shields.io/badge/license-MIT-1c2128" alt="MIT license"/>
+<img src="https://img.shields.io/badge/rust-1.99-1c2128?logo=rust&logoColor=F74C00" alt="Rust 1.99"/>
+<img src="https://img.shields.io/badge/protocol-ITCH%205.0-1c2128?logo=rss&logoColor=58A6FF" alt="ITCH 5.0"/>
+<img src="https://img.shields.io/badge/tests-47%20passing-1c2128?logo=cargo&logoColor=DEA584" alt="47 tests passing"/>
+<img src="https://img.shields.io/badge/license-MIT-1c2128?logo=opensourceinitiative&logoColor=3DA639" alt="MIT license"/>
 
 </div>
 
