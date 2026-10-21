@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300">
+  <rect width="1200" height="300" fill="#0d1117"/>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace">
+    <text x="60" y="92" font-size="58" font-weight="bold" fill="#f0f6fc">itch-feed</text>
+    <text x="62" y="130" font-size="22" fill="#8b949e">ITCH 5.0 feed handler in Rust</text>
+    <text x="446" y="150" font-size="17" fill="#d29922" text-anchor="middle">retransmit</text>
+  </g>
+  <path d="M 592 198 C 560 156, 330 156, 302 192" fill="none" stroke="#d29922" stroke-width="2.5"/>
+  <polygon points="298,205 290,187 306,187" fill="#d29922"/>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="20">
+    <g>
+      <rect x="60" y="200" width="84" height="52" rx="6" fill="#1c2128" stroke="#30363d"/>
+      <text x="102" y="233" fill="#c9d1d9" text-anchor="middle">1041</text>
+    </g>
+    <g>
+      <rect x="158" y="200" width="84" height="52" rx="6" fill="#1c2128" stroke="#30363d"/>
+      <text x="200" y="233" fill="#c9d1d9" text-anchor="middle">1042</text>
+    </g>
+    <g>
+      <rect x="256" y="200" width="84" height="52" rx="6" fill="none" stroke="#d29922" stroke-width="2" stroke-dasharray="6 4"/>
+      <text x="298" y="233" font-size="17" fill="#d29922" text-anchor="middle">gap</text>
+    </g>
+    <g>
+      <rect x="354" y="200" width="84" height="52" rx="6" fill="#1c2128" stroke="#30363d"/>
+      <text x="396" y="233" fill="#c9d1d9" text-anchor="middle">1044</text>
+    </g>
+    <g>
+      <rect x="452" y="200" width="84" height="52" rx="6" fill="#1c2128" stroke="#30363d"/>
+      <text x="494" y="233" fill="#c9d1d9" text-anchor="middle">1045</text>
+    </g>
+    <g>
+      <rect x="550" y="200" width="84" height="52" rx="6" fill="#1c2128" stroke="#30363d"/>
+      <text x="592" y="233" fill="#c9d1d9" text-anchor="middle">1046</text>
+    </g>
+    <g opacity="0.4">
+      <rect x="648" y="200" width="84" height="52" rx="6" fill="#1c2128" stroke="#30363d"/>
+      <text x="690" y="233" fill="#c9d1d9" text-anchor="middle">1047</text>
+    </g>
+    <g opacity="0.18">
+      <rect x="746" y="200" width="84" height="52" rx="6" fill="#1c2128" stroke="#30363d"/>
+      <text x="788" y="233" fill="#c9d1d9" text-anchor="middle">1048</text>
+    </g>
+  </g>
+</svg>

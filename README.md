@@ -1,11 +1,29 @@
-# itch-feed
+<div align="center">
+
+<img src="docs/assets/banner.svg" alt="itch-feed: ITCH 5.0 feed handler in Rust" width="100%"/>
+
+<img src="https://img.shields.io/badge/rust-1.99-1c2128?logo=rust&logoColor=white" alt="Rust 1.99"/>
+<img src="https://img.shields.io/badge/protocol-ITCH%205.0-1c2128" alt="ITCH 5.0"/>
+<img src="https://img.shields.io/badge/tests-47%20passing-1c2128" alt="47 tests passing"/>
+<img src="https://img.shields.io/badge/license-MIT-1c2128" alt="MIT license"/>
+
+</div>
 
 An ITCH-style market data feed handler in Rust. A UDP multicast simulator
 publishes sequenced binary messages; the handler consumes them through a
 lock-free SPSC ring buffer, watches for sequence gaps, and asks for the
 missing ranges to be resent instead of silently losing data.
 
-## The receive path
+```mermaid
+graph LR
+    SIM["sim: seeded stream,<br/>drop and reorder knobs"] -->|UDP datagrams or piped bytes| RECV["recv: frame, decode"]
+    RECV --> RING["SPSC ring buffer"]
+    RING --> TRACK["sequence tracker"]
+    TRACK --> STATS["run stats at exit"]
+    TRACK -.->|"gap opens: retransmit request<br/>(answered by the tests, printed by recv)"| SIM
+```
+
+## 📡 The receive path
 
 Datagrams are framed and decoded, and the messages queue in a lock-free
 SPSC ring buffer between the socket loop and the consumer: fixed
@@ -29,9 +47,12 @@ Three counters keep the accounting honest:
 - `messages recovered`: late arrivals that filled a requested slot
   (every open range was requested when it opened, so every fill counts).
 - `messages lost`: sequence numbers still missing when the stats are
-  read. A gap is only visible once a later message arrives, so messages
-  dropped at the very tail of a stream cannot be told apart from the
-  stream simply ending, and never show up here.
+  read.
+
+> [!NOTE]
+> A gap is only visible once a later message arrives, so messages
+> dropped at the very tail of a stream cannot be told apart from the
+> stream simply ending, and never show up in `messages lost`.
 
 The channel is deliberately transport-agnostic: the tracker decides what
 is missing, and whoever holds the requests decides how to answer them.
@@ -112,13 +133,12 @@ At exit it prints the run stats, one fact per line: datagrams,
 messages received, duplicates, gaps seen, open gaps (still missing,
 with the ranges kept internally), retransmit requests, messages
 recovered, messages lost, decode errors, ring overflows, and the last
-sequence number. In pipe
-mode it also lists each retransmit request as it stands at exit, in the
-order the gaps opened. A late arrival that lands inside a known gap
-closes it in the accounting; a gap that is seen is still reported even
-after it closes.
+sequence number. In pipe mode it also lists each retransmit request as
+it stands at exit, in the order the gaps opened. A late arrival that
+lands inside a known gap closes it in the accounting; a gap that is seen
+is still reported even after it closes.
 
-## Performance
+## ⚡ Performance
 
 Measured with criterion 0.5.1, release build (rustc 1.99.0), on
 2026-10-21, on a 2-vCPU cloud VM with 7.8 GB RAM. Every bench builds its
@@ -154,15 +174,25 @@ of headroom over anything one UDP socket is likely to deliver.
 
 ## Limits
 
-Two honest ones. The UDP path has never run over a real network in the
-environment this was built in (UDP sends are blocked there), so the
-socket code is verified by compilation, unit tests, and the pipe path
-rather than by live traffic. And the retransmit requests the receiver
-emits are printed and counted, but nothing in the two binaries answers
-them yet: closing the loop needs a sender that keeps the stream around
-to resend from, which the simulator currently only does inside the
-tests.
+Two honest ones.
+
+> [!WARNING]
+> The UDP path has never run over a real network in the environment
+> this was built in (UDP sends are blocked there), so the socket code
+> is verified by compilation, unit tests, and the pipe path rather
+> than by live traffic.
+
+And the retransmit requests the receiver emits are printed and counted,
+but nothing in the two binaries answers them yet: closing the loop needs
+a sender that keeps the stream around to resend from, which the
+simulator currently only does inside the tests.
 
 ## License
 
 MIT
+
+<div align="center">
+
+<img src="docs/assets/footer.svg" alt="" width="100%"/>
+
+</div>
